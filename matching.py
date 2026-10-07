@@ -34,7 +34,7 @@ def find_book_in_db(title: str, author: str = None, conn=None):
             return matches[0]
         return None
 
-    # no author specified — pick the work_id with the most editions (most "canonical")
+    # no author specified, pick the work_id with the most editions (most "canonical")
     work_counts = Counter(results['work_id'])
     most_common_work_id = work_counts.most_common(1)[0][0]
     return results[results['work_id'] == most_common_work_id].iloc[0]
