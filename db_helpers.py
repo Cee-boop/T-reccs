@@ -34,6 +34,7 @@ def build_genre_pools(conn: sqlite3.Connection, genres: list[str]) -> Pools:
 
         seen: set[str] = set()
         pool: Pool = []
+
         for work_id, title, count in rows:
             key = title.strip().lower()
             if key in seen:
@@ -42,6 +43,7 @@ def build_genre_pools(conn: sqlite3.Connection, genres: list[str]) -> Pools:
             pool.append((work_id, count))
             if len(pool) == POOL_SIZE:
                 break
+
         pools[genre] = pool
         if pool:
             logging.info(f'{genre}: pool {len(pool)}, cutoff {pool[-1][1]} editions')
@@ -59,6 +61,7 @@ def pick_work_id(genre: str, pools: Pools, recent: Recent) -> str:
     candidates = [p for p in pools[genre] if p[0] not in recent[genre]]
     if not candidates:
         raise ValueError(f'no candidates left for {genre}')
+
     ids, counts = zip(*candidates)
     work_id = random.choices(ids, weights=[c ** WEIGHT_POWER for c in counts], k=1)[0]
     recent[genre].append(work_id)
