@@ -1,6 +1,7 @@
 import os
 import discord
 from matching import *
+from db_helpers import *
 from dotenv import load_dotenv
 from discord.ext import commands
 from isbnlib import isbn_from_words
@@ -17,8 +18,19 @@ logging.basicConfig(
 )
 logger = logging.getLogger('book_rec_bot')
 
-load_dotenv()
+
+ALL_GENRES = [
+    'Fantasy', 'Classics', 'Science Fiction', 'Horror', 'Western', 'Thriller', 'Mystery',
+    'Romance', 'Adventure', 'Humor', 'War', 'Poetry', 'Theatre', 'Comic',
+    'History', 'Biography', 'Religion', 'Philosophy',
+    'Science', 'Politics', 'Self-Help', 'Art', 'Nature', 'Dystopian'
+]
+
 CONN = get_connection()
+GENRE_POOLS = build_genre_pools(CONN, ALL_GENRES)
+RECENT = make_recent(ALL_GENRES)
+
+load_dotenv()
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -35,8 +47,29 @@ async def on_ready():
 
 @bot.event
 async def on_command_error(ctx, error):
-    logger.error(f'Error in command {ctx.command}: {error}', exc_info=True)
-    await ctx.send("Something went wrong — try again?")
+    error = getattr(error, 'original', error)   # unwrap CommandInvokeError
+
+    if isinstance(error, commands.CommandNotFound):
+        return   # ignore unknown commands, e.g. other bots' prefixes
+
+    logger.error(f'Error in command {ctx.command}: {error!r}', exc_info=(type(error), error, error.__traceback__))
+
+    if isinstance(error, discord.Forbidden):
+        msg = ("I'm missing a permission in this channel (probably **Embed Links**). "
+               "Ask a server admin to enable it for my role.")
+    elif isinstance(error, commands.CommandOnCooldown):
+        msg = f"Slow down. Try again in {error.retry_after:.0f}s."
+    else:
+        msg = "Invalid input — try again?"
+
+    try:
+        await ctx.send(msg)
+    except discord.Forbidden:
+        try:
+            await ctx.author.send(f"I can't reply in #{ctx.channel} on {ctx.guild}. "
+                                  "Please ask an admin to give me Send Messages and Embed Links.")
+        except discord.Forbidden:
+            pass
 
 
 def create_goodreads_url(title: str, author=None) -> str | None:
@@ -69,41 +102,37 @@ def build_book_embed(title: str, author: str = None, goodreads_url: str = None, 
 @bot.command(name='rechelp')
 async def rechelp(ctx):
     embed = discord.Embed(
-        title="📖 How to use !rec",
-        description="Get a book's info and a link to its Goodreads page.",
+        title="📖 ⭐︎ 🎲 How to use `!rec` and `!random`",
+        description="Get the link to a specific book's Goodreads page, or I can suggest a random book from a selected genre!",
         color=discord.Color.blurple()
     )
     embed.add_field(
         name="Commands:",
         value=(
-        "`!rec {title}`\n`!rec {title} by {author}`\n\n"
-        "*Adding the author increases accuracy when recc'ing a title shared by multiple books.*"
+            "`!rec {title}`\n`!rec {title} by {author}`\n`!random {genre}`\n\n"
+            "*Adding the author increases accuracy when recc'ing a title shared by multiple books.*"
         ),
         inline=False
     )
     embed.add_field(
         name="Examples:",
-        value="`!rec Dune`\n`!rec Dune by Frank Herbert`",
+        value="`!rec I Married a Lizardman`\n`!rec I Married a Lizardman by Regine Abel`\n`!random fantasy`",
         inline=False
     )
     embed.add_field(
         name="Tips:",
         value=(
-            "• When including an author always separate the author's name with `by` -> e.g. `!rec Dune by Frank Herbert`, not `!rec Dune Frank Herbert`.\n"
+            "• When including an author always separate the author's name with `by` -> e.g. `!rec It by Stephen King`, not `!rec It Stephen King`.\n"
             "• Double-check the spelling.\n"
             "• Niche book titles may not include an embedded book cover.\n"
+            "• `!random` needs a genre. Use `!random` on its own to see the list of genres.\n"
+            "• `!random` leans toward well-known books but smaller genres may show lesser-known ones.\n"
+            "• `!random` isn't 100% accurate so expect some false positives within each genre."
         ),
         inline=False
     )
 
     await ctx.send(embed=embed)
-
-
-ALL_GENRES = ['Fantasy', 'Science Fiction', 'Horror', 'Western', 'Thriller', 'Mystery',
-              'Romance', 'Adventure', 'Humor', 'War', 'Poetry', 'Drama', 'Comic',
-              'History', 'Memoir', 'Biography', 'Religion', 'Philosophy',
-              'Science', 'Politics', 'Psychology', 'Self-Help', 'Memoir', 'Travel',
-              'Art', 'Business', 'Education', 'Health', 'Nature', 'Dystopian']
 
 
 @bot.command(name='random')
@@ -131,20 +160,25 @@ async def get_random_book(ctx, *, genre: str = None):
         await ctx.send(embed=embed)
         return
 
-    genres_to_use = [matched_genre]
+    try:
+        work_id = pick_work_id(matched_genre, GENRE_POOLS, RECENT)
+    except (KeyError, ValueError):   # empty pool, or genre missing from GENRE_POOLS
+        work_id = None
 
-    placeholders = ",".join("?" * len(genres_to_use))
-    min_editions = 100
-    query = f'''
-        SELECT works.* FROM works
-        JOIN work_genres ON works.id = work_genres.work_id
-        JOIN work_edition_counts ON works.id = work_edition_counts.work_id
-        WHERE work_genres.genre IN ({placeholders})
-        AND work_edition_counts.edition_count >= ?
-        ORDER BY RANDOM() LIMIT 1
-    '''
-    params = genres_to_use + [min_editions]
-    book_info = pd.read_sql(query, CONN, params=params).iloc[0]
+    result = None
+    if work_id is not None:
+        result = pd.read_sql('SELECT * FROM works WHERE id = ?', CONN, params=(work_id,))
+
+    if result is None or result.empty:
+        embed = discord.Embed(
+            title="📭 No results",
+            description=f"No books found for `{matched_genre}` right now.",
+            color=discord.Color.red()
+        )
+        await ctx.send(embed=embed)
+        return
+
+    book_info = result.iloc[0]
 
     first_author_id = book_info['work_author_ids'].split(',')[0]
     book_author = get_author_names([first_author_id], CONN).get(first_author_id, "Unknown author")
@@ -159,6 +193,7 @@ async def get_random_book(ctx, *, genre: str = None):
 
 
 @bot.command(name='rec')
+@commands.cooldown(1, 3, commands.BucketType.user)
 async def rec(ctx, *, user_input: str):
     logger.info(f'{ctx.author}: !rec {user_input}')
 

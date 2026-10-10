@@ -2,7 +2,8 @@ from db_helpers import *
 from collections import Counter
 
 
-def find_book_in_db(title: str, author: str = None, conn=None):
+def find_book_in_db(title: str, author: str | None = None,
+                    conn: sqlite3.Connection | None = None) -> pd.Series | None:
     exact_query = '''
         SELECT editions.id AS edition_id, editions.title, works.id AS work_id, works.work_author_ids
         FROM editions
@@ -24,7 +25,7 @@ def find_book_in_db(title: str, author: str = None, conn=None):
         return None
 
     if author:
-        matches = []
+        matches: list[pd.Series] = []
         for _, row in results.iterrows():
             author_ids = row['work_author_ids'].split(',')
             names = get_author_names(author_ids, conn)
@@ -40,7 +41,7 @@ def find_book_in_db(title: str, author: str = None, conn=None):
     return results[results['work_id'] == most_common_work_id].iloc[0]
 
 
-def parse_title(user_input: str):
+def parse_title(user_input: str) -> tuple[str, str | None]:
     if ' by ' in user_input.lower():
         idx = user_input.lower().rfind(' by ')
         title = re.sub(r'\s+', ' ', user_input[:idx].strip())
